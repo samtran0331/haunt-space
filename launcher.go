@@ -33,7 +33,7 @@ func saveBlueprint(bp GlobalBlueprint) error {
 	if err != nil {
 		return fmt.Errorf("marshal blueprint: %w", err)
 	}
-	if err := os.WriteFile(templatePath(bp.TemplateName), data, 0o644); err != nil {
+	if err := os.WriteFile(templatePath(bp.TemplateName), data, 0o600); err != nil {
 		return fmt.Errorf("write template file: %w", err)
 	}
 	return nil
