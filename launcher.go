@@ -26,7 +26,7 @@ func templatePath(name string) string {
 // creating the templates directory if it does not exist.
 func saveBlueprint(bp GlobalBlueprint) error {
 	dir := templateDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create template directory: %w", err)
 	}
 	data, err := json.MarshalIndent(bp, "", "  ")
