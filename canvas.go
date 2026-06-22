@@ -106,14 +106,34 @@ func RenderNodePreview(c *Canvas, node *LayoutNode, x, y, w, h int, pathIndex in
 		if splitW <= 1 {
 			splitW = 2
 		}
-		RenderNodePreview(c, node.LeftChild, x, y, splitW, h, pathIndex+1, currentPath)
-		RenderNodePreview(c, node.RightChild, x+splitW-1, y, w-splitW+1, h, pathIndex+1, currentPath)
+		if node.LeftChild == nil {
+			c.DrawBox(x, y, splitW, h)
+			c.WriteText(x, y, splitW, h, "[ empty ]")
+		} else {
+			RenderNodePreview(c, node.LeftChild, x, y, splitW, h, pathIndex+1, currentPath)
+		}
+		if node.RightChild == nil {
+			c.DrawBox(x+splitW-1, y, w-splitW+1, h)
+			c.WriteText(x+splitW-1, y, w-splitW+1, h, "[ empty ]")
+		} else {
+			RenderNodePreview(c, node.RightChild, x+splitW-1, y, w-splitW+1, h, pathIndex+1, currentPath)
+		}
 	} else if node.Direction == Horizontal {
 		splitH := (h * pct) / 100
 		if splitH <= 1 {
 			splitH = 2
 		}
-		RenderNodePreview(c, node.LeftChild, x, y, w, splitH, pathIndex+1, currentPath)
-		RenderNodePreview(c, node.RightChild, x, y+splitH-1, w, h-splitH+1, pathIndex+1, currentPath)
+		if node.LeftChild == nil {
+			c.DrawBox(x, y, w, splitH)
+			c.WriteText(x, y, w, splitH, "[ empty ]")
+		} else {
+			RenderNodePreview(c, node.LeftChild, x, y, w, splitH, pathIndex+1, currentPath)
+		}
+		if node.RightChild == nil {
+			c.DrawBox(x, y+splitH-1, w, h-splitH+1)
+			c.WriteText(x, y+splitH-1, w, h-splitH+1, "[ empty ]")
+		} else {
+			RenderNodePreview(c, node.RightChild, x, y+splitH-1, w, h-splitH+1, pathIndex+1, currentPath)
+		}
 	}
 }
