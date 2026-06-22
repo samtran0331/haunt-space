@@ -44,3 +44,65 @@ func TestBuildGhosttyCommandLeafWithCommand(t *testing.T) {
 		t.Errorf("got %q, want %q", got, expected)
 	}
 }
+
+func TestBuildGhosttyArgs(t *testing.T) {
+	mockTree := &LayoutNode{
+		Direction: Vertical,
+		Size:      30,
+		LeftChild: &LayoutNode{Direction: None, Command: "lazygit"},
+		RightChild: &LayoutNode{
+			Direction: Horizontal,
+			Size:      50,
+			LeftChild:  &LayoutNode{Direction: None, Command: "claude --resume"},
+			RightChild: &LayoutNode{Direction: None, Command: ""},
+		},
+	}
+
+	got := BuildGhosttyArgs(mockTree, "/users/test/project")
+	want := []string{
+		"split-surface",
+		"--vertical",
+		"--working-directory=/users/test/project",
+		"--command=lazygit",
+		"split-surface",
+		"--horizontal",
+		"--working-directory=/users/test/project",
+		"--command=claude --resume",
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("unexpected arg count: got %d, want %d\nGot: %#v\nWant: %#v", len(got), len(want), got, want)
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected arg at index %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestBuildGhosttyArgsNilNode(t *testing.T) {
+	if got := BuildGhosttyArgs(nil, "/tmp"); got != nil {
+		t.Errorf("expected nil args for nil node, got %#v", got)
+	}
+}
+
+func TestBuildGhosttyArgsLeafNoCommand(t *testing.T) {
+	leaf := &LayoutNode{Direction: None, Command: ""}
+	if got := BuildGhosttyArgs(leaf, "/tmp"); got != nil {
+		t.Errorf("expected nil args for leaf with no command, got %#v", got)
+	}
+}
+
+func TestBuildGhosttyArgsLeafWithCommand(t *testing.T) {
+	leaf := &LayoutNode{Direction: None, Command: "vim"}
+	want := []string{"--command=vim"}
+	got := BuildGhosttyArgs(leaf, "/tmp")
+
+	if len(got) != len(want) {
+		t.Fatalf("unexpected arg count: got %d, want %d", len(got), len(want))
+	}
+	if got[0] != want[0] {
+		t.Fatalf("unexpected arg: got %q, want %q", got[0], want[0])
+	}
+}
