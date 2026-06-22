@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // templateDir returns the path to the templates directory.
@@ -50,6 +51,25 @@ func loadBlueprint(name string) (GlobalBlueprint, error) {
 		return GlobalBlueprint{}, fmt.Errorf("parse template %q: %w", name, err)
 	}
 	return bp, nil
+}
+
+// listTemplateNames returns all saved template names sorted alphabetically.
+func listTemplateNames() ([]string, error) {
+	dir := templateDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			names = append(names, strings.TrimSuffix(e.Name(), ".json"))
+		}
+	}
+	return names, nil
 }
 
 // launchTemplate loads the named template, compiles it into a Ghostty command,

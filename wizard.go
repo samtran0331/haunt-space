@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -10,34 +11,68 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// wizardStep enumerates the sequential states of the wizard.
+// ── types ─────────────────────────────────────────────────────────────────────
+
 type wizardStep int
 
 const (
-	stepChooseName   wizardStep = iota // enter template name
-	stepChooseAction                   // choose split direction or leaf command
-	stepInputSize                      // enter split percentage
-	stepInputCommand                   // enter leaf command (optional)
-	stepDone                           // template saved
+	stepListTemplates wizardStep = iota
+	stepChooseName
+	stepChooseAction
+	stepInputSize
+	stepInputCommand
+	stepConfirm
+	stepDone
+	stepNotFound
 )
 
-// pendingPath represents a tree position that still needs to be configured.
+type wizardMode int
+
+const (
+	modeNew  wizardMode = iota
+	modeEdit
+	modeCopy
+)
+
+type confirmKind int
+
+const (
+	confirmDeleteTemplate confirmKind = iota
+	confirmDeletePane
+	confirmExit
+)
+
+// pendingPath is a selectable leaf node in the current layout tree.
 type pendingPath struct {
-	path []int
+	path    []int
+	paneNum int
 }
 
-// wizardModel is the Bubble Tea application model for the template wizard.
 type wizardModel struct {
 	step         wizardStep
+	prevStep     wizardStep
+	mode         wizardMode
 	root         *LayoutNode
-	pending      []pendingPath // queue of tree paths awaiting configuration
-	currentPath  []int
+	leaves       []pendingPath
+	selectedLeaf int
 	pendingDir   SplitDirection
 	templateName string
+	originalName string
 	input        textinput.Model
 	errorMsg     string
-	saved        bool
+	saveMsg      string
+	isDirty      bool
+	launchName   string // template to launch after TUI exits
+	notFoundName string // name attempted when not found
+	// list view
+	templateList []string
+	listCursor   int
+	// confirm
+	confirmMsg  string
+	confirmKind confirmKind
 }
+
+// ── styles ────────────────────────────────────────────────────────────────────
 
 var (
 	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
@@ -45,22 +80,77 @@ var (
 	activeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	subtleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	successStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	cursorStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
 )
 
-// newWizardModel creates a fresh wizard model.
-func newWizardModel() wizardModel {
-	ti := textinput.New()
-	ti.Focus()
-	ti.CharLimit = 128
-	ti.Width = 40
-	return wizardModel{
-		step:  stepChooseName,
-		input: ti,
+// ── tree helpers ──────────────────────────────────────────────────────────────
+
+// collectLeaves walks the tree appending each leaf position (nil node or Direction==None).
+func collectLeaves(node *LayoutNode, path []int, counter *int, out *[]pendingPath) {
+	if node == nil || node.Direction == None {
+		*out = append(*out, pendingPath{path: copyPath(path), paneNum: *counter})
+		*counter++
+		return
+	}
+	collectLeaves(node.LeftChild, append(path, 0), counter, out)
+	collectLeaves(node.RightChild, append(path, 1), counter, out)
+}
+
+// buildLeaves returns all leaf nodes numbered from 1.
+func buildLeaves(root *LayoutNode) []pendingPath {
+	var out []pendingPath
+	n := 1
+	collectLeaves(root, []int{}, &n, &out)
+	return out
+}
+
+// findLeafIndex returns the index in leaves whose path matches, or 0.
+func findLeafIndex(leaves []pendingPath, path []int) int {
+	for i, l := range leaves {
+		if pathsEqual(l.path, path) {
+			return i
+		}
+	}
+	return 0
+}
+
+// deletePaneAt removes the leaf at path by promoting its sibling into the parent slot.
+func deletePaneAt(root **LayoutNode, path []int) {
+	if len(path) == 0 {
+		*root = nil
+		return
+	}
+	parentPath := path[:len(path)-1]
+	childSide := path[len(path)-1]
+	parentSlot := nodeAt(root, parentPath)
+	parent := *parentSlot
+	var sibling *LayoutNode
+	if childSide == 0 {
+		sibling = parent.RightChild
+	} else {
+		sibling = parent.LeftChild
+	}
+	if sibling == nil {
+		*parentSlot = &LayoutNode{Direction: None}
+	} else {
+		*parentSlot = sibling
 	}
 }
 
-// nodeAt returns the node pointer at the given path within the tree,
-// creating intermediate nodes as needed.
+// newNotFoundModel starts the wizard on the "template not found" screen.
+func newNotFoundModel(name string) wizardModel {
+	names, _ := listTemplateNames()
+	return wizardModel{
+		step:         stepNotFound,
+		notFoundName: name,
+		templateList: names,
+		input:        newInput(),
+	}
+}
+
+// ── node helpers ──────────────────────────────────────────────────────────────
+
 func nodeAt(root **LayoutNode, path []int) **LayoutNode {
 	cur := root
 	for _, dir := range path {
@@ -79,223 +169,649 @@ func nodeAt(root **LayoutNode, path []int) **LayoutNode {
 	return cur
 }
 
-// copyPath returns a deep copy of the path slice.
 func copyPath(p []int) []int {
 	out := make([]int, len(p))
 	copy(out, p)
 	return out
 }
 
-// advancePending removes the first pending path and sets the next current path.
-func (m *wizardModel) advancePending() {
-	if len(m.pending) > 0 {
-		m.pending = m.pending[1:]
+func getNode(root *LayoutNode, path []int) *LayoutNode {
+	cur := root
+	for _, dir := range path {
+		if cur == nil {
+			return nil
+		}
+		if dir == 0 {
+			cur = cur.LeftChild
+		} else {
+			cur = cur.RightChild
+		}
 	}
-	if len(m.pending) == 0 {
-		// All nodes configured — save and finish.
-		m.finalize()
-		return
-	}
-	m.currentPath = copyPath(m.pending[0].path)
-	m.step = stepChooseAction
+	return cur
 }
 
-// finalize serialises the blueprint and transitions to stepDone.
-func (m *wizardModel) finalize() {
-	if m.root == nil {
-		m.root = &LayoutNode{}
-	}
-	bp := GlobalBlueprint{
-		TemplateName: m.templateName,
-		Root:         *m.root,
-	}
-	if err := saveBlueprint(bp); err != nil {
-		m.errorMsg = "Save failed: " + err.Error()
-	} else {
-		m.saved = true
-	}
-	m.step = stepDone
+// ── constructors ──────────────────────────────────────────────────────────────
+
+func newInput() textinput.Model {
+	ti := textinput.New()
+	ti.Focus()
+	ti.CharLimit = 128
+	ti.Width = 40
+	return ti
 }
 
-// Init satisfies the tea.Model interface.
+// newWizardModel starts in the template list view.
+func newWizardModel() wizardModel {
+	names, _ := listTemplateNames()
+	return wizardModel{
+		step:         stepListTemplates,
+		templateList: names,
+		input:        newInput(),
+	}
+}
+
+// newBooModel starts directly in new-template mode.
+func newBooModel() wizardModel {
+	m := newWizardModel()
+	m.step = stepChooseName
+	m.mode = modeNew
+	m.input.Placeholder = "my-layout"
+	return m
+}
+
+// newEditModel builds a model pre-loaded with an existing template.
+func newEditModel(name string, root *LayoutNode, mode wizardMode) wizardModel {
+	return wizardModel{
+		step:         stepChooseAction,
+		mode:         mode,
+		root:         root,
+		leaves:       buildLeaves(root),
+		templateName: name,
+		originalName: name,
+		input:        newInput(),
+		isDirty:      mode == modeCopy,
+	}
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
 func (m wizardModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
-// Update handles keyboard events and state transitions.
+// ── Update ────────────────────────────────────────────────────────────────────
+
 func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
-			if m.step == stepDone {
-				return m, tea.Quit
-			}
-			return m, tea.Quit
-		case "enter":
-			return m.handleEnter()
-		case "v", "h", "c":
-			if m.step == stepChooseAction {
-				return m.handleActionKey(msg.String())
-			}
+	keyMsg, isKey := msg.(tea.KeyMsg)
+	if !isKey {
+		// Pass non-key events to text input for typing steps.
+		switch m.step {
+		case stepChooseName, stepInputSize, stepInputCommand:
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
 		}
+		return m, nil
 	}
 
-	if m.step == stepChooseName || m.step == stepInputSize || m.step == stepInputCommand {
+	key := keyMsg.String()
+	if key == "ctrl+c" {
+		return m, tea.Quit
+	}
+
+	switch m.step {
+	case stepListTemplates:
+		return m.updateList(key)
+	case stepChooseName:
+		return m.updateChooseName(msg, key)
+	case stepChooseAction:
+		return m.updateChooseAction(key)
+	case stepInputSize:
+		return m.updateInputSize(msg, key)
+	case stepInputCommand:
+		return m.updateInputCommand(msg, key)
+	case stepConfirm:
+		return m.updateConfirm(key)
+	case stepNotFound:
+		return m.updateNotFound(key)
+	case stepDone:
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// ── List view ─────────────────────────────────────────────────────────────────
+
+func (m wizardModel) updateList(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "q", "x":
+		return m, tea.Quit
+	case "j", "down":
+		if m.listCursor < len(m.templateList)-1 {
+			m.listCursor++
+		}
+	case "k", "up":
+		if m.listCursor > 0 {
+			m.listCursor--
+		}
+	case "enter":
+		if len(m.templateList) == 0 {
+			break
+		}
+		m.launchName = m.templateList[m.listCursor]
+		return m, tea.Quit
+	case "n":
+		m.step = stepChooseName
+		m.mode = modeNew
+		m.input.SetValue("")
+		m.input.Placeholder = "my-layout"
+	case "e":
+		if len(m.templateList) == 0 {
+			break
+		}
+		return m.openForEdit(m.templateList[m.listCursor], modeEdit)
+	case "c":
+		if len(m.templateList) == 0 {
+			break
+		}
+		m.originalName = m.templateList[m.listCursor]
+		m.mode = modeCopy
+		m.step = stepChooseName
+		m.input.SetValue("")
+		m.input.Placeholder = m.originalName + "-copy"
+	case "d":
+		if len(m.templateList) == 0 {
+			break
+		}
+		name := m.templateList[m.listCursor]
+		m.confirmMsg = fmt.Sprintf("Delete template %q? This cannot be undone.", name)
+		m.confirmKind = confirmDeleteTemplate
+		m.prevStep = stepListTemplates
+		m.step = stepConfirm
+	}
+	return m, nil
+}
+
+func (m wizardModel) updateNotFound(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "c":
+		m.mode = modeNew
+		m.input.SetValue(m.notFoundName)
+		m.input.Placeholder = "my-layout"
+		m.step = stepChooseName
+	case "l":
+		m.step = stepListTemplates
+	case "q", "x":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m wizardModel) openForEdit(name string, mode wizardMode) (tea.Model, tea.Cmd) {
+	bp, err := loadBlueprint(name)
+	if err != nil {
+		m.errorMsg = "Load failed: " + err.Error()
+		return m, nil
+	}
+	root := bp.Root
+	em := newEditModel(name, &root, mode)
+	return em, textinput.Blink
+}
+
+// ── Choose name ───────────────────────────────────────────────────────────────
+
+func (m wizardModel) updateChooseName(msg tea.Msg, key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "q", "x":
+		if m.mode == modeEdit || m.mode == modeCopy {
+			names, _ := listTemplateNames()
+			m.templateList = names
+			m.step = stepListTemplates
+			return m, nil
+		}
+		return m, tea.Quit
+	case "enter":
+		return m.handleChooseName()
+	default:
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
 	}
-
-	return m, nil
 }
 
-// handleEnter processes the Enter key based on the current step.
-func (m wizardModel) handleEnter() (tea.Model, tea.Cmd) {
-	switch m.step {
-	case stepChooseName:
-		name := strings.TrimSpace(m.input.Value())
-		if name == "" {
-			m.errorMsg = "Template name cannot be empty."
-			return m, nil
-		}
-		if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
-			m.errorMsg = "Template name must not contain path separators or '..'."
-			return m, nil
-		}
-		m.templateName = name
-		m.errorMsg = ""
-		m.input.SetValue("")
-		// Start at the root position.
-		m.pending = []pendingPath{{path: []int{}}}
-		m.currentPath = []int{}
-		m.step = stepChooseAction
-
-	case stepInputSize:
-		val, err := strconv.Atoi(strings.TrimSpace(m.input.Value()))
-		if err != nil || val < 1 || val > 99 {
-			m.errorMsg = "Enter a whole number between 1 and 99."
-			return m, nil
-		}
-		m.errorMsg = ""
-
-		// Set the node at the current path.
-		nodePtr := nodeAt(&m.root, m.currentPath)
-		(*nodePtr).Direction = m.pendingDir
-		(*nodePtr).Size = val
-
-		// Replace current path in the queue with its two children.
-		m.pending[0] = pendingPath{path: append(copyPath(m.currentPath), 0)}
-		leftPath := copyPath(m.pending[0].path)
-		rightPath := append(copyPath(m.currentPath), 1)
-		m.pending = append([]pendingPath{{path: leftPath}, {path: rightPath}}, m.pending[1:]...)
-		m.currentPath = copyPath(m.pending[0].path)
-		m.input.SetValue("")
-		m.step = stepChooseAction
-
-	case stepInputCommand:
-		cmd := strings.TrimSpace(m.input.Value())
-		nodePtr := nodeAt(&m.root, m.currentPath)
-		(*nodePtr).Direction = None
-		(*nodePtr).Command = cmd
-		m.input.SetValue("")
-		m.errorMsg = ""
-		m.advancePending()
-
-	case stepDone:
-		return m, tea.Quit
+func (m wizardModel) handleChooseName() (tea.Model, tea.Cmd) {
+	name := strings.TrimSpace(m.input.Value())
+	if name == "" {
+		m.errorMsg = "Name cannot be empty."
+		return m, nil
+	}
+	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		m.errorMsg = "Name must not contain path separators or '..'."
+		return m, nil
 	}
 
-	return m, nil
+	if m.mode == modeNew || m.mode == modeCopy {
+		if _, err := os.Stat(templatePath(name)); err == nil {
+			m.errorMsg = fmt.Sprintf("Template %q already exists — choose a different name.", name)
+			return m, nil
+		}
+	}
+
+	m.errorMsg = ""
+	m.templateName = name
+	m.input.SetValue("")
+
+	if m.mode == modeNew {
+		m.root = nil
+		m.leaves = buildLeaves(nil)
+		m.selectedLeaf = 0
+		m.isDirty = false
+		m.step = stepChooseAction
+		return m, nil
+	}
+
+	// modeCopy: load original, open in edit mode under new name
+	bp, err := loadBlueprint(m.originalName)
+	if err != nil {
+		m.errorMsg = "Load failed: " + err.Error()
+		return m, nil
+	}
+	root := bp.Root
+	em := newEditModel(name, &root, modeCopy)
+	em.originalName = m.originalName
+	return em, textinput.Blink
 }
 
-// handleActionKey handles the v/h/c shortcut keys during stepChooseAction.
-func (m wizardModel) handleActionKey(key string) (tea.Model, tea.Cmd) {
+// ── Choose action (main editing screen) ───────────────────────────────────────
+
+func (m wizardModel) updateChooseAction(key string) (tea.Model, tea.Cmd) {
+	m.saveMsg = "" // clear save banner on any action
+	m.errorMsg = ""
+
 	switch key {
-	case "v":
+	case "q", "x":
+		if m.isDirty {
+			m.confirmMsg = "You have unsaved changes. Exit without saving?"
+			m.confirmKind = confirmExit
+			m.prevStep = stepChooseAction
+			m.step = stepConfirm
+			return m, nil
+		}
+		if m.mode == modeEdit || m.mode == modeCopy {
+			names, _ := listTemplateNames()
+			m.templateList = names
+			m.step = stepListTemplates
+			return m, nil
+		}
+		return m, tea.Quit
+
+	case "v", "h":
 		m.pendingDir = Vertical
-		m.errorMsg = ""
-		m.input.SetValue("")
-		m.input.Placeholder = "e.g. 30"
-		m.step = stepInputSize
-	case "h":
-		m.pendingDir = Horizontal
-		m.errorMsg = ""
+		if key == "h" {
+			m.pendingDir = Horizontal
+		}
 		m.input.SetValue("")
 		m.input.Placeholder = "e.g. 50"
 		m.step = stepInputSize
+
 	case "c":
-		m.errorMsg = ""
 		m.input.SetValue("")
+		// Pre-fill current command if set
+		if len(m.leaves) > 0 {
+			if n := getNode(m.root, m.leaves[m.selectedLeaf].path); n != nil {
+				m.input.SetValue(n.Command)
+			}
+		}
 		m.input.Placeholder = "e.g. lazygit  (leave blank for plain shell)"
 		m.step = stepInputCommand
+
+	case "d":
+		if len(m.leaves) <= 1 {
+			m.errorMsg = "Cannot delete the only pane."
+			return m, nil
+		}
+		sel := m.leaves[m.selectedLeaf]
+		m.confirmMsg = fmt.Sprintf("Delete pane %d? Its sibling will take its place.", sel.paneNum)
+		m.confirmKind = confirmDeletePane
+		m.prevStep = stepChooseAction
+		m.step = stepConfirm
+
+	case "s":
+		m.doSave()
+
+	default:
+		if target, err := strconv.Atoi(key); err == nil {
+			for i, l := range m.leaves {
+				if l.paneNum == target {
+					m.selectedLeaf = i
+					break
+				}
+			}
+		}
 	}
 	return m, nil
 }
 
-// View renders the current wizard state.
+func (m *wizardModel) doSave() {
+	root := m.root
+	if root == nil {
+		root = &LayoutNode{Direction: None}
+	}
+	bp := GlobalBlueprint{
+		TemplateName: m.templateName,
+		Root:         *root,
+	}
+	if err := saveBlueprint(bp); err != nil {
+		m.errorMsg = "Save failed: " + err.Error()
+	} else {
+		m.isDirty = false
+		m.saveMsg = "✓ Saved"
+	}
+}
+
+// ── Input size ────────────────────────────────────────────────────────────────
+
+func (m wizardModel) updateInputSize(msg tea.Msg, key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		return m.handleInputSize()
+	case "esc", "q":
+		m.step = stepChooseAction
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+}
+
+func (m wizardModel) handleInputSize() (tea.Model, tea.Cmd) {
+	val, err := strconv.Atoi(strings.TrimSpace(m.input.Value()))
+	if err != nil || val < 1 || val > 99 {
+		m.errorMsg = "Enter a whole number between 1 and 99."
+		return m, nil
+	}
+	m.errorMsg = ""
+	if len(m.leaves) == 0 {
+		return m, nil
+	}
+	path := copyPath(m.leaves[m.selectedLeaf].path)
+	nodePtr := nodeAt(&m.root, path)
+	(*nodePtr).Direction = m.pendingDir
+	(*nodePtr).Size = val
+	(*nodePtr).LeftChild = nil
+	(*nodePtr).RightChild = nil
+
+	m.leaves = buildLeaves(m.root)
+	m.selectedLeaf = findLeafIndex(m.leaves, append(copyPath(path), 0))
+	m.input.SetValue("")
+	m.isDirty = true
+	m.step = stepChooseAction
+	return m, nil
+}
+
+// ── Input command ─────────────────────────────────────────────────────────────
+
+func (m wizardModel) updateInputCommand(msg tea.Msg, key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		return m.handleInputCommand()
+	case "esc":
+		m.step = stepChooseAction
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+}
+
+func (m wizardModel) handleInputCommand() (tea.Model, tea.Cmd) {
+	if len(m.leaves) == 0 {
+		return m, nil
+	}
+	path := copyPath(m.leaves[m.selectedLeaf].path)
+	cmd := strings.TrimSpace(m.input.Value())
+	nodePtr := nodeAt(&m.root, path)
+	(*nodePtr).Direction = None
+	(*nodePtr).Command = cmd
+
+	m.leaves = buildLeaves(m.root)
+	m.selectedLeaf = findLeafIndex(m.leaves, path)
+	m.input.SetValue("")
+	m.isDirty = true
+	m.step = stepChooseAction
+	return m, nil
+}
+
+// ── Confirm ───────────────────────────────────────────────────────────────────
+
+func (m wizardModel) updateConfirm(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "y", "Y":
+		return m.executeConfirm()
+	case "n", "N", "esc", "q", "x":
+		m.step = m.prevStep
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m wizardModel) executeConfirm() (tea.Model, tea.Cmd) {
+	switch m.confirmKind {
+	case confirmDeleteTemplate:
+		name := m.templateList[m.listCursor]
+		os.Remove(templatePath(name))
+		names, _ := listTemplateNames()
+		m.templateList = names
+		if m.listCursor >= len(m.templateList) && m.listCursor > 0 {
+			m.listCursor--
+		}
+		m.step = stepListTemplates
+
+	case confirmDeletePane:
+		if len(m.leaves) > 0 {
+			deletePaneAt(&m.root, m.leaves[m.selectedLeaf].path)
+			m.leaves = buildLeaves(m.root)
+			if m.selectedLeaf >= len(m.leaves) {
+				m.selectedLeaf = 0
+			}
+			m.isDirty = true
+		}
+		m.step = stepChooseAction
+
+	case confirmExit:
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// ── View ──────────────────────────────────────────────────────────────────────
+
 func (m wizardModel) View() string {
 	var b strings.Builder
-
-	b.WriteString(titleStyle.Render("✦ haunt-space wizard") + "\n\n")
+	b.WriteString(titleStyle.Render("✦ haunt-space") + "\n\n")
 
 	switch m.step {
+	case stepListTemplates:
+		b.WriteString(m.viewList())
 	case stepChooseName:
-		b.WriteString("Template name:\n")
-		b.WriteString(m.input.View() + "\n")
-
+		b.WriteString(m.viewChooseName())
 	case stepChooseAction:
-		b.WriteString(fmt.Sprintf("Configuring node at path %v\n\n", m.currentPath))
-		b.WriteString(activeStyle.Render("[v]") + " Vertical split\n")
-		b.WriteString(activeStyle.Render("[h]") + " Horizontal split\n")
-		b.WriteString(activeStyle.Render("[c]") + " Set pane command (leaf)\n")
-		b.WriteString("\n" + m.renderPreview())
-
+		b.WriteString(m.viewChooseAction())
 	case stepInputSize:
-		dir := string(m.pendingDir)
-		b.WriteString(fmt.Sprintf("Size percentage for %s split (1–99):\n", dir))
+		b.WriteString(fmt.Sprintf("Size %% for %s split (1–99):\n", m.pendingDir))
 		b.WriteString(m.input.View() + "\n")
-		b.WriteString("\n" + m.renderPreview())
-
+		b.WriteString(subtleStyle.Render("esc to cancel") + "\n\n")
+		b.WriteString(m.renderPreview())
 	case stepInputCommand:
-		b.WriteString("Command to run in this pane (optional, press Enter to skip):\n")
+		b.WriteString("Command for this pane (blank = plain shell):\n")
 		b.WriteString(m.input.View() + "\n")
-		b.WriteString("\n" + m.renderPreview())
-
+		b.WriteString(subtleStyle.Render("esc to cancel") + "\n\n")
+		b.WriteString(m.renderPreview())
+	case stepConfirm:
+		b.WriteString(warningStyle.Render("⚠  "+m.confirmMsg) + "\n\n")
+		b.WriteString(activeStyle.Render("[y]") + " Yes   " + subtleStyle.Render("[n]") + " No\n")
+	case stepNotFound:
+		b.WriteString(m.viewNotFound())
 	case stepDone:
-		if m.saved {
-			b.WriteString(successStyle.Render(fmt.Sprintf(
-				"✓ Template %q saved to %s\n", m.templateName, templatePath(m.templateName),
-			)))
-		} else {
-			b.WriteString(m.errorMsg + "\n")
-		}
-		b.WriteString(subtleStyle.Render("\nPress Enter or q to exit.") + "\n")
+		b.WriteString(successStyle.Render("✓ Saved — press any key to exit.") + "\n")
 	}
 
-	if m.errorMsg != "" && m.step != stepDone {
-		b.WriteString("\n" + errorStyle.Render("⚠ "+m.errorMsg) + "\n")
+	if m.errorMsg != "" {
+		b.WriteString("\n" + errorStyle.Render("⚠  "+m.errorMsg) + "\n")
 	}
-
 	return b.String()
 }
 
-// renderPreview builds the ASCII canvas and returns it as a string.
-func (m *wizardModel) renderPreview() string {
-	const cw, ch = 60, 18
-	c := NewCanvas(cw, ch)
-	if m.root != nil {
-		RenderNodePreview(&c, m.root, 0, 0, cw, ch, 0, m.currentPath)
+func (m wizardModel) viewList() string {
+	var b strings.Builder
+	b.WriteString("Templates\n\n")
+	if len(m.templateList) == 0 {
+		b.WriteString(subtleStyle.Render("No templates yet.") + "\n\n")
 	} else {
-		c.DrawBox(0, 0, cw, ch)
-		c.WriteText(0, 0, cw, ch, "[ new template ]")
+		for i, name := range m.templateList {
+			if i == m.listCursor {
+				b.WriteString(cursorStyle.Render("▶ "+name) + "\n")
+			} else {
+				b.WriteString("  " + subtleStyle.Render(name) + "\n")
+			}
+		}
+		b.WriteString("\n")
+		b.WriteString(activeStyle.Render("[↵]") + " Launch   ")
+		b.WriteString(activeStyle.Render("[e]") + " Edit   ")
+		b.WriteString(activeStyle.Render("[c]") + " Copy   ")
+		b.WriteString(activeStyle.Render("[d]") + " Delete\n")
 	}
-	return subtleStyle.Render(c.Render()) + "\n"
+	b.WriteString(activeStyle.Render("[n]") + " New   ")
+	b.WriteString(subtleStyle.Render("[j/k]") + " Navigate   ")
+	b.WriteString(subtleStyle.Render("[q]") + " Quit\n")
+	return b.String()
 }
 
-// runWizard starts the Bubble Tea program for the template wizard.
+func (m wizardModel) viewNotFound() string {
+	var b strings.Builder
+	b.WriteString(warningStyle.Render(fmt.Sprintf("Template %q not found.\n\n", m.notFoundName)))
+	b.WriteString(activeStyle.Render("[c]") + " Create new template\n")
+	b.WriteString(activeStyle.Render("[l]") + " List templates\n")
+	b.WriteString(activeStyle.Render("[x]") + " Exit\n")
+	return b.String()
+}
+
+func (m wizardModel) viewChooseName() string {
+	var b strings.Builder
+	switch m.mode {
+	case modeNew:
+		b.WriteString("New template name:\n")
+	case modeCopy:
+		b.WriteString(fmt.Sprintf("Copy of %q — enter new name:\n", m.originalName))
+	}
+	b.WriteString(m.input.View() + "\n")
+	return b.String()
+}
+
+func (m wizardModel) viewChooseAction() string {
+	var b strings.Builder
+
+	// Template name with dirty indicator
+	nameLabel := m.templateName
+	if m.isDirty {
+		nameLabel += " " + warningStyle.Render("●")
+	}
+	b.WriteString(nameLabel + "\n\n")
+
+	if len(m.leaves) > 0 {
+		b.WriteString(fmt.Sprintf("Pane %d selected\n\n", m.leaves[m.selectedLeaf].paneNum))
+	}
+
+	b.WriteString(activeStyle.Render("[v]") + " Vertical split\n")
+	b.WriteString(activeStyle.Render("[h]") + " Horizontal split\n")
+	b.WriteString(activeStyle.Render("[c]") + " Set pane command\n")
+	b.WriteString(activeStyle.Render("[d]") + " Delete pane\n")
+	b.WriteString(activeStyle.Render("[s]") + " Save\n")
+	b.WriteString(activeStyle.Render("[x]") + " Exit\n")
+
+	// Current pane command
+	if len(m.leaves) > 0 {
+		paneCmd := "(not set)"
+		if n := getNode(m.root, m.leaves[m.selectedLeaf].path); n != nil && n.Command != "" {
+			paneCmd = n.Command
+		}
+		b.WriteString(subtleStyle.Render(fmt.Sprintf("\n     Pane %d command: %s", m.leaves[m.selectedLeaf].paneNum, paneCmd)) + "\n")
+	}
+
+	// Save confirmation banner
+	if m.saveMsg != "" {
+		b.WriteString(successStyle.Render(m.saveMsg) + "\n")
+	}
+
+	// Pane selector
+	if len(m.leaves) > 1 {
+		b.WriteString("\n")
+		for i, l := range m.leaves {
+			if i == m.selectedLeaf {
+				b.WriteString(activeStyle.Render(fmt.Sprintf("[%d]", l.paneNum)) + " ")
+			} else {
+				b.WriteString(subtleStyle.Render(fmt.Sprintf("[%d]", l.paneNum)) + " ")
+			}
+		}
+		b.WriteString(subtleStyle.Render(" ← number to select") + "\n")
+	}
+
+	b.WriteString("\n" + m.renderPreview())
+	return b.String()
+}
+
+// ── Preview ───────────────────────────────────────────────────────────────────
+
+func (m *wizardModel) renderPreview() string {
+	const cw, ch = 90, 27
+	c := NewCanvas(cw, ch)
+	var activePath []int
+	if len(m.leaves) > 0 {
+		activePath = m.leaves[m.selectedLeaf].path
+	}
+	if m.root != nil {
+		RenderNodePreview(&c, m.root, 0, 0, cw, ch, []int{}, m.leaves, activePath)
+	} else {
+		c.DrawBox(0, 0, cw, ch)
+		if len(m.leaves) > 0 {
+			c.WriteText(0, 0, cw, ch, fmt.Sprintf("►%d◄", m.leaves[0].paneNum))
+		}
+	}
+	rendered := subtleStyle.Render(c.Render())
+	if len(m.leaves) > 0 {
+		marker := fmt.Sprintf("►%d◄", m.leaves[m.selectedLeaf].paneNum)
+		rendered = strings.ReplaceAll(rendered, marker, activeStyle.Render(marker))
+	}
+	return rendered + "\n"
+}
+
+// ── Entry points ──────────────────────────────────────────────────────────────
+
+func runTUI(initial wizardModel) error {
+	p := tea.NewProgram(initial, tea.WithAltScreen())
+	final, err := p.Run()
+	if err != nil {
+		return err
+	}
+	if m, ok := final.(wizardModel); ok && m.launchName != "" {
+		return launchTemplate(m.launchName)
+	}
+	return nil
+}
+
+// runWizard starts in the template list view (summon with no arg).
 func runWizard() error {
-	p := tea.NewProgram(newWizardModel(), tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	return runTUI(newWizardModel())
+}
+
+// runBoo starts directly in new-template mode.
+func runBoo() error {
+	return runTUI(newBooModel())
+}
+
+// runNotFound shows the "template not found" screen.
+func runNotFound(name string) error {
+	return runTUI(newNotFoundModel(name))
 }

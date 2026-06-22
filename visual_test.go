@@ -55,7 +55,7 @@ func TestRenderNodePreviewLeaf(t *testing.T) {
 	c := NewCanvas(20, 10)
 	node := &LayoutNode{Direction: None, Command: "vim"}
 	// Should not panic and should draw a box.
-	RenderNodePreview(&c, node, 0, 0, 20, 10, 0, []int{})
+	RenderNodePreview(&c, node, 0, 0, 20, 10, []int{}, nil, nil)
 	if c.Grid[0][0] != '┌' {
 		t.Errorf("expected box corner at (0,0)")
 	}
@@ -64,13 +64,13 @@ func TestRenderNodePreviewLeaf(t *testing.T) {
 func TestRenderNodePreviewSplit(t *testing.T) {
 	c := NewCanvas(40, 20)
 	node := &LayoutNode{
-		Direction: Vertical,
-		Size:      50,
+		Direction:  Vertical,
+		Size:       50,
 		LeftChild:  &LayoutNode{Direction: None, Command: "vim"},
 		RightChild: &LayoutNode{Direction: None, Command: "zsh"},
 	}
 	// Should not panic.
-	RenderNodePreview(&c, node, 0, 0, 40, 20, 0, []int{0})
+	RenderNodePreview(&c, node, 0, 0, 40, 20, []int{}, nil, nil)
 }
 
 func TestCanvasRender(t *testing.T) {
