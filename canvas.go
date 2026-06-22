@@ -38,21 +38,25 @@ func (c *Canvas) DrawBox(x, y, w, h int) {
 
 // WriteText centers text inside the given region of the canvas.
 func (c *Canvas) WriteText(x, y, w, h int, text string) {
-	if len(text) == 0 || w <= 2 || h <= 2 {
+	if text == "" || w <= 2 || h <= 2 {
 		return
 	}
-	if len(text) > w-2 {
+
+	r := []rune(text)
+	if len(r) > w-2 {
 		maxLen := w - 3
 		if maxLen < 0 {
 			return
 		}
-		text = text[:maxLen] + "…"
+		r = append(r[:maxLen], '…')
 	}
+
 	targetY := y + (h / 2)
-	targetX := x + ((w - len(text)) / 2)
-	for i, char := range text {
-		if targetX+i < c.Width && targetY < c.Height {
-			c.Grid[targetY][targetX+i] = char
+	targetX := x + ((w - len(r)) / 2)
+	for i, ch := range r {
+		xi := targetX + i
+		if xi >= 0 && xi < c.Width && targetY >= 0 && targetY < c.Height {
+			c.Grid[targetY][xi] = ch
 		}
 	}
 }
