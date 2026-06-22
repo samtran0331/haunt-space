@@ -159,6 +159,10 @@ func (m wizardModel) handleEnter() (tea.Model, tea.Cmd) {
 			m.errorMsg = "Template name cannot be empty."
 			return m, nil
 		}
+		if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+			m.errorMsg = "Template name must not contain path separators or '..'."
+			return m, nil
+		}
 		m.templateName = name
 		m.errorMsg = ""
 		m.input.SetValue("")
