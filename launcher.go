@@ -17,8 +17,8 @@ func templateDir() string {
 	return filepath.Join(home, ".config", "haunt-space", "templates")
 }
 
-// templatePath returns the full path for a template by name.
 func templatePath(name string) string {
+	name = filepath.Base(name)
 	return filepath.Join(templateDir(), name+".json")
 }
 
