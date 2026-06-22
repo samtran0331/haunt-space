@@ -42,7 +42,11 @@ func (c *Canvas) WriteText(x, y, w, h int, text string) {
 		return
 	}
 	if len(text) > w-2 {
-		text = text[:w-3] + "…"
+		maxLen := w - 3
+		if maxLen < 0 {
+			return
+		}
+		text = text[:maxLen] + "…"
 	}
 	targetY := y + (h / 2)
 	targetX := x + ((w - len(text)) / 2)

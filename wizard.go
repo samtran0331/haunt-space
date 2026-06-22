@@ -261,7 +261,7 @@ func (m wizardModel) View() string {
 	case stepDone:
 		if m.saved {
 			b.WriteString(successStyle.Render(fmt.Sprintf(
-				"✔ Template %q saved to %s\n", m.templateName, templatePath(m.templateName),
+				"✓ Template %q saved to %s\n", m.templateName, templatePath(m.templateName),
 			)))
 		} else {
 			b.WriteString(m.errorMsg + "\n")
