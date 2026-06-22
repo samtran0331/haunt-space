@@ -73,14 +73,23 @@ func (c *Canvas) Render() string {
 // RenderNodePreview recursively draws the layout tree onto the canvas.
 // pathIndex tracks the recursion depth; currentPath is the active wizard focus.
 func RenderNodePreview(c *Canvas, node *LayoutNode, x, y, w, h int, pathIndex int, currentPath []int) {
+	_ = pathIndex
+	renderNodePreview(c, node, x, y, w, h, currentPath, nil)
+}
+
+func renderNodePreview(c *Canvas, node *LayoutNode, x, y, w, h int, currentPath []int, branchPath []int) {
 	if node == nil || w <= 1 || h <= 1 {
 		return
 	}
 
-	// Determine if this specific branch node matches the active targeted wizard path
-	isActive := true
-	if len(currentPath) < pathIndex {
-		isActive = false
+	isActive := len(branchPath) == len(currentPath)
+	if isActive {
+		for i := range branchPath {
+			if branchPath[i] != currentPath[i] {
+				isActive = false
+				break
+			}
+		}
 	}
 
 	if node.Direction == None {
@@ -110,13 +119,15 @@ func RenderNodePreview(c *Canvas, node *LayoutNode, x, y, w, h int, pathIndex in
 			c.DrawBox(x, y, splitW, h)
 			c.WriteText(x, y, splitW, h, "[ empty ]")
 		} else {
-			RenderNodePreview(c, node.LeftChild, x, y, splitW, h, pathIndex+1, currentPath)
+			leftPath := append(append([]int(nil), branchPath...), 0)
+			renderNodePreview(c, node.LeftChild, x, y, splitW, h, currentPath, leftPath)
 		}
 		if node.RightChild == nil {
 			c.DrawBox(x+splitW-1, y, w-splitW+1, h)
 			c.WriteText(x+splitW-1, y, w-splitW+1, h, "[ empty ]")
 		} else {
-			RenderNodePreview(c, node.RightChild, x+splitW-1, y, w-splitW+1, h, pathIndex+1, currentPath)
+			rightPath := append(append([]int(nil), branchPath...), 1)
+			renderNodePreview(c, node.RightChild, x+splitW-1, y, w-splitW+1, h, currentPath, rightPath)
 		}
 	} else if node.Direction == Horizontal {
 		splitH := (h * pct) / 100
@@ -127,13 +138,15 @@ func RenderNodePreview(c *Canvas, node *LayoutNode, x, y, w, h int, pathIndex in
 			c.DrawBox(x, y, w, splitH)
 			c.WriteText(x, y, w, splitH, "[ empty ]")
 		} else {
-			RenderNodePreview(c, node.LeftChild, x, y, w, splitH, pathIndex+1, currentPath)
+			leftPath := append(append([]int(nil), branchPath...), 0)
+			renderNodePreview(c, node.LeftChild, x, y, w, splitH, currentPath, leftPath)
 		}
 		if node.RightChild == nil {
 			c.DrawBox(x, y+splitH-1, w, h-splitH+1)
 			c.WriteText(x, y+splitH-1, w, h-splitH+1, "[ empty ]")
 		} else {
-			RenderNodePreview(c, node.RightChild, x, y+splitH-1, w, h-splitH+1, pathIndex+1, currentPath)
+			rightPath := append(append([]int(nil), branchPath...), 1)
+			renderNodePreview(c, node.RightChild, x, y+splitH-1, w, h-splitH+1, currentPath, rightPath)
 		}
 	}
 }
