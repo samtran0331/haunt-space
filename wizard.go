@@ -20,6 +20,7 @@ const (
 	stepChooseName
 	stepChooseAction
 	stepInputSize
+	stepInputFolder
 	stepInputCommand
 	stepConfirm
 	stepDone
@@ -62,6 +63,8 @@ type wizardModel struct {
 	errorMsg     string
 	saveMsg      string
 	isDirty      bool
+	cwd          string // directory where hsp was invoked
+	tempFolder   string // folder staged between stepInputFolder and stepInputCommand
 	launchName   string // template to launch after TUI exits
 	notFoundName string // name attempted when not found
 	// list view
@@ -70,6 +73,9 @@ type wizardModel struct {
 	// confirm
 	confirmMsg  string
 	confirmKind confirmKind
+	// terminal size
+	width  int
+	height int
 }
 
 // ── styles ────────────────────────────────────────────────────────────────────
@@ -203,10 +209,12 @@ func newInput() textinput.Model {
 // newWizardModel starts in the template list view.
 func newWizardModel() wizardModel {
 	names, _ := listTemplateNames()
+	cwd, _ := os.Getwd()
 	return wizardModel{
 		step:         stepListTemplates,
 		templateList: names,
 		input:        newInput(),
+		cwd:          cwd,
 	}
 }
 
@@ -221,6 +229,7 @@ func newBooModel() wizardModel {
 
 // newEditModel builds a model pre-loaded with an existing template.
 func newEditModel(name string, root *LayoutNode, mode wizardMode) wizardModel {
+	cwd, _ := os.Getwd()
 	return wizardModel{
 		step:         stepChooseAction,
 		mode:         mode,
@@ -230,6 +239,7 @@ func newEditModel(name string, root *LayoutNode, mode wizardMode) wizardModel {
 		originalName: name,
 		input:        newInput(),
 		isDirty:      mode == modeCopy,
+		cwd:          cwd,
 	}
 }
 
@@ -244,9 +254,14 @@ func (m wizardModel) Init() tea.Cmd {
 func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	keyMsg, isKey := msg.(tea.KeyMsg)
 	if !isKey {
+		if sz, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width = sz.Width
+			m.height = sz.Height
+			return m, nil
+		}
 		// Pass non-key events to text input for typing steps.
 		switch m.step {
-		case stepChooseName, stepInputSize, stepInputCommand:
+		case stepChooseName, stepInputSize, stepInputFolder, stepInputCommand:
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
@@ -268,6 +283,8 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateChooseAction(key)
 	case stepInputSize:
 		return m.updateInputSize(msg, key)
+	case stepInputFolder:
+		return m.updateInputFolder(msg, key)
 	case stepInputCommand:
 		return m.updateInputCommand(msg, key)
 	case stepConfirm:
@@ -455,15 +472,16 @@ func (m wizardModel) updateChooseAction(key string) (tea.Model, tea.Cmd) {
 		m.step = stepInputSize
 
 	case "c":
-		m.input.SetValue("")
-		// Pre-fill current command if set
+		// Pre-fill folder with the node's current folder, or cwd as default.
+		currentFolder := m.cwd
 		if len(m.leaves) > 0 {
-			if n := getNode(m.root, m.leaves[m.selectedLeaf].path); n != nil {
-				m.input.SetValue(n.Command)
+			if n := getNode(m.root, m.leaves[m.selectedLeaf].path); n != nil && n.Folder != "" {
+				currentFolder = n.Folder
 			}
 		}
-		m.input.Placeholder = "e.g. lazygit  (leave blank for plain shell)"
-		m.step = stepInputCommand
+		m.input.SetValue(currentFolder)
+		m.input.Placeholder = m.cwd
+		m.step = stepInputFolder
 
 	case "d":
 		if len(m.leaves) <= 1 {
@@ -550,6 +568,47 @@ func (m wizardModel) handleInputSize() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// ── Input folder ──────────────────────────────────────────────────────────────
+
+func (m wizardModel) updateInputFolder(msg tea.Msg, key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		return m.handleInputFolder()
+	case "esc":
+		m.step = stepChooseAction
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+}
+
+func (m wizardModel) handleInputFolder() (tea.Model, tea.Cmd) {
+	raw := strings.TrimSpace(m.input.Value())
+	folder := raw
+	m.errorMsg = ""
+
+	if raw == "" {
+		// Blank → home directory
+		folder = "~"
+		m.errorMsg = "Blank folder — pane will open at home directory (~)."
+	}
+
+	m.tempFolder = folder
+
+	// Advance to command input, pre-filling current command if set.
+	m.input.SetValue("")
+	if len(m.leaves) > 0 {
+		if n := getNode(m.root, m.leaves[m.selectedLeaf].path); n != nil {
+			m.input.SetValue(n.Command)
+		}
+	}
+	m.input.Placeholder = "e.g. lazygit  (leave blank for plain shell)"
+	m.step = stepInputCommand
+	return m, nil
+}
+
 // ── Input command ─────────────────────────────────────────────────────────────
 
 func (m wizardModel) updateInputCommand(msg tea.Msg, key string) (tea.Model, tea.Cmd) {
@@ -571,14 +630,17 @@ func (m wizardModel) handleInputCommand() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	path := copyPath(m.leaves[m.selectedLeaf].path)
-	cmd := strings.TrimSpace(m.input.Value())
+	command := strings.TrimSpace(m.input.Value())
 	nodePtr := nodeAt(&m.root, path)
 	(*nodePtr).Direction = None
-	(*nodePtr).Command = cmd
+	(*nodePtr).Command = command
+	(*nodePtr).Folder = m.tempFolder
+	m.tempFolder = ""
 
 	m.leaves = buildLeaves(m.root)
 	m.selectedLeaf = findLeafIndex(m.leaves, path)
 	m.input.SetValue("")
+	m.errorMsg = ""
 	m.isDirty = true
 	m.step = stepChooseAction
 	return m, nil
@@ -629,39 +691,39 @@ func (m wizardModel) executeConfirm() (tea.Model, tea.Cmd) {
 // ── View ──────────────────────────────────────────────────────────────────────
 
 func (m wizardModel) View() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("✦ haunt-space") + "\n\n")
-
 	switch m.step {
 	case stepListTemplates:
+		var b strings.Builder
+		b.WriteString(titleStyle.Render("✦ haunt-space") + "\n\n")
 		b.WriteString(m.viewList())
-	case stepChooseName:
-		b.WriteString(m.viewChooseName())
+		if m.errorMsg != "" {
+			b.WriteString("\n" + errorStyle.Render("⚠  "+m.errorMsg) + "\n")
+		}
+		return b.String()
 	case stepChooseAction:
+		var b strings.Builder
+		b.WriteString(titleStyle.Render("✦ haunt-space") + "\n\n")
 		b.WriteString(m.viewChooseAction())
+		if m.errorMsg != "" {
+			b.WriteString("\n" + errorStyle.Render("⚠  "+m.errorMsg) + "\n")
+		}
+		return b.String()
+	case stepChooseName:
+		return m.renderModal("✦ haunt-space", m.modalChooseName())
 	case stepInputSize:
-		b.WriteString(fmt.Sprintf("Size %% for %s split (1–99):\n", m.pendingDir))
-		b.WriteString(m.input.View() + "\n")
-		b.WriteString(subtleStyle.Render("esc to cancel") + "\n\n")
-		b.WriteString(m.renderPreview())
+		return m.renderModal("Split Size", m.modalInputSize())
+	case stepInputFolder:
+		return m.renderModal("Pane Folder", m.modalInputFolder())
 	case stepInputCommand:
-		b.WriteString("Command for this pane (blank = plain shell):\n")
-		b.WriteString(m.input.View() + "\n")
-		b.WriteString(subtleStyle.Render("esc to cancel") + "\n\n")
-		b.WriteString(m.renderPreview())
+		return m.renderModal("Pane Command", m.modalInputCommand())
 	case stepConfirm:
-		b.WriteString(warningStyle.Render("⚠  "+m.confirmMsg) + "\n\n")
-		b.WriteString(activeStyle.Render("[y]") + " Yes   " + subtleStyle.Render("[n]") + " No\n")
+		return m.renderModal("Confirm", m.modalConfirm())
 	case stepNotFound:
-		b.WriteString(m.viewNotFound())
+		return m.renderModal("✦ haunt-space", m.modalNotFound())
 	case stepDone:
-		b.WriteString(successStyle.Render("✓ Saved — press any key to exit.") + "\n")
+		return m.renderModal("✦ haunt-space", m.modalDone())
 	}
-
-	if m.errorMsg != "" {
-		b.WriteString("\n" + errorStyle.Render("⚠  "+m.errorMsg) + "\n")
-	}
-	return b.String()
+	return ""
 }
 
 func (m wizardModel) viewList() string {
@@ -689,7 +751,87 @@ func (m wizardModel) viewList() string {
 	return b.String()
 }
 
-func (m wizardModel) viewNotFound() string {
+// ── Modal renderer ────────────────────────────────────────────────────────────
+
+func (m wizardModel) renderModal(title, body string) string {
+	modalStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("99")).
+		Padding(1, 2).
+		Width(54)
+	content := titleStyle.Render(title) + "\n\n" + body
+	box := modalStyle.Render(content)
+	if m.width > 0 && m.height > 0 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+	}
+	return box
+}
+
+func (m wizardModel) modalChooseName() string {
+	var b strings.Builder
+	switch m.mode {
+	case modeNew:
+		b.WriteString("New template name:\n\n")
+	case modeCopy:
+		b.WriteString(fmt.Sprintf("Copy of %q\nNew name:\n\n", m.originalName))
+	}
+	b.WriteString(m.input.View() + "\n")
+	if m.errorMsg != "" {
+		b.WriteString("\n" + errorStyle.Render("⚠  "+m.errorMsg) + "\n")
+	}
+	b.WriteString("\n" + subtleStyle.Render("[↵] confirm   [x] cancel"))
+	return b.String()
+}
+
+func (m wizardModel) modalInputSize() string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Size %% for %s split (1–99):\n\n", m.pendingDir))
+	b.WriteString(m.input.View() + "\n")
+	if m.errorMsg != "" {
+		b.WriteString("\n" + errorStyle.Render("⚠  "+m.errorMsg) + "\n")
+	}
+	b.WriteString("\n" + subtleStyle.Render("[↵] confirm   [esc] cancel"))
+	return b.String()
+}
+
+func (m wizardModel) modalInputFolder() string {
+	var b strings.Builder
+	b.WriteString("Folder for this pane:\n")
+	b.WriteString(subtleStyle.Render("blank = home   relative paths OK") + "\n\n")
+	b.WriteString(m.input.View() + "\n")
+	if m.errorMsg != "" {
+		b.WriteString("\n" + errorStyle.Render(m.errorMsg) + "\n")
+	}
+	b.WriteString("\n" + subtleStyle.Render("[↵] confirm   [esc] cancel"))
+	return b.String()
+}
+
+func (m wizardModel) modalInputCommand() string {
+	var b strings.Builder
+	folderLabel := m.tempFolder
+	if folderLabel == "" {
+		folderLabel = m.cwd
+	} else if folderLabel == "~" {
+		folderLabel = "~ (home)"
+	}
+	b.WriteString(subtleStyle.Render("Folder: "+folderLabel) + "\n\n")
+	b.WriteString("Command (blank = plain shell):\n\n")
+	b.WriteString(m.input.View() + "\n")
+	if m.errorMsg != "" {
+		b.WriteString("\n" + errorStyle.Render("⚠  "+m.errorMsg) + "\n")
+	}
+	b.WriteString("\n" + subtleStyle.Render("[↵] confirm   [esc] cancel"))
+	return b.String()
+}
+
+func (m wizardModel) modalConfirm() string {
+	var b strings.Builder
+	b.WriteString(warningStyle.Render("⚠  "+m.confirmMsg) + "\n\n")
+	b.WriteString(activeStyle.Render("[y]") + " Yes   " + subtleStyle.Render("[n]") + " No\n")
+	return b.String()
+}
+
+func (m wizardModel) modalNotFound() string {
 	var b strings.Builder
 	b.WriteString(warningStyle.Render(fmt.Sprintf("Template %q not found.\n\n", m.notFoundName)))
 	b.WriteString(activeStyle.Render("[c]") + " Create new template\n")
@@ -698,16 +840,8 @@ func (m wizardModel) viewNotFound() string {
 	return b.String()
 }
 
-func (m wizardModel) viewChooseName() string {
-	var b strings.Builder
-	switch m.mode {
-	case modeNew:
-		b.WriteString("New template name:\n")
-	case modeCopy:
-		b.WriteString(fmt.Sprintf("Copy of %q — enter new name:\n", m.originalName))
-	}
-	b.WriteString(m.input.View() + "\n")
-	return b.String()
+func (m wizardModel) modalDone() string {
+	return successStyle.Render("✓ Saved — press any key to exit.")
 }
 
 func (m wizardModel) viewChooseAction() string {
@@ -731,13 +865,23 @@ func (m wizardModel) viewChooseAction() string {
 	b.WriteString(activeStyle.Render("[s]") + " Save\n")
 	b.WriteString(activeStyle.Render("[x]") + " Exit\n")
 
-	// Current pane command
+	// Current pane folder + command info
 	if len(m.leaves) > 0 {
+		num := m.leaves[m.selectedLeaf].paneNum
+		paneFolder := "(current directory)"
 		paneCmd := "(not set)"
-		if n := getNode(m.root, m.leaves[m.selectedLeaf].path); n != nil && n.Command != "" {
-			paneCmd = n.Command
+		if n := getNode(m.root, m.leaves[m.selectedLeaf].path); n != nil {
+			if n.Folder == "~" {
+				paneFolder = "~ (home)"
+			} else if n.Folder != "" {
+				paneFolder = n.Folder
+			}
+			if n.Command != "" {
+				paneCmd = n.Command
+			}
 		}
-		b.WriteString(subtleStyle.Render(fmt.Sprintf("\n     Pane %d command: %s", m.leaves[m.selectedLeaf].paneNum, paneCmd)) + "\n")
+		b.WriteString(subtleStyle.Render(fmt.Sprintf("\n     Pane %d folder:  %s", num, paneFolder)) + "\n")
+		b.WriteString(subtleStyle.Render(fmt.Sprintf("     Pane %d command: %s", num, paneCmd)) + "\n")
 	}
 
 	// Save confirmation banner

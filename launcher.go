@@ -85,7 +85,11 @@ func launchTemplate(name string) error {
 		return fmt.Errorf("resolve working directory: %w", err)
 	}
 
-	args := BuildGhosttyCommand(&bp.Root, cwd)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = cwd
+	}
+	args := BuildGhosttyCommand(&bp.Root, cwd, homeDir)
 
 	// Invoke ghostty via the shell so the pre-formatted argument string
 	// (including embedded quotes) is parsed correctly by the shell.

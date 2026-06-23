@@ -13,9 +13,10 @@ const (
 type LayoutNode struct {
 	Direction  SplitDirection `json:"direction"`             // "vertical", "horizontal", or "none"
 	Size       int            `json:"size_pct"`              // Split percentage ratio (e.g., 30, 50, 70)
-	Command    string         `json:"command,omitempty"`     // Executable binary to run (only valid if Direction is "none")
-	LeftChild  *LayoutNode    `json:"left_child,omitempty"`  // Represents Left or Top pane branch
-	RightChild *LayoutNode    `json:"right_child,omitempty"` // Represents Right or Bottom pane branch
+	Folder     string         `json:"folder,omitempty"`      // Working directory for this pane; "" = cwd, "~" = home
+	Command    string         `json:"command,omitempty"`     // Executable to run; empty = default shell
+	LeftChild  *LayoutNode    `json:"left_child,omitempty"`  // Left or Top pane branch
+	RightChild *LayoutNode    `json:"right_child,omitempty"` // Right or Bottom pane branch
 }
 
 // GlobalBlueprint is the top-level structure stored as a JSON template file.
